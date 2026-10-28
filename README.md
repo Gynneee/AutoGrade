@@ -1,6 +1,6 @@
-# Grade Match
+# CineMatch
 
-Grade Match is a browser-based photo color-matching tool. Choose a photo to edit and a reference photo, compare the before-and-after preview, refine the suggested Lightroom-style settings, and export the result.
+CineMatch is a browser-based photo color-matching tool. Choose a photo to edit and a reference photo, compare the before-and-after preview, refine the suggested Lightroom-style settings, and export the result.
 
 The app runs locally in your browser. Your photos are processed on your device and are not sent to an inference API.
 
@@ -72,7 +72,7 @@ The model does not generate pixels directly. It predicts adjustment controls; th
 
 [`hahnec/color-matcher`](https://github.com/hahnec/color-matcher) is a Python image-to-image color-transfer library. It offers algorithmic methods such as histogram matching, Reinhard transfer, MKL, and multivariate Gaussian transfer, with command-line and Python API usage. It can transfer the color distribution of a reference image directly onto a source image; it does not require training a neural network for those methods.
 
-Grade Match is a browser editing application rather than a general-purpose Python library. Its optional AI is trained to predict editable Lightroom-style settings from paired image features and labeled adjustments. The compact model in this workspace is experimental; without that Git-ignored model file, the app uses the built-in calculation-based matcher. The two projects therefore use different approaches and are not the same model or interchangeable implementations.
+Grade Match is a browser editing application rather than a general-purpose Python library. Its optional AI is trained to predict editable Lightroom-style settings from paired image features and labeled adjustments. Until a sufficiently large, representative dataset is prepared and a model is installed, its normal matching path is the built-in calculation-based matcher. The two projects therefore use different approaches and are not the same model or interchangeable implementations.
 
 ## Project files
 

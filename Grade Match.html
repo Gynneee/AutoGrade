@@ -2,24 +2,34 @@
 <html>
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+    <meta
+      name="viewport"
+      content="width=device-width,initial-scale=1,viewport-fit=cover"
+    />
     <link rel="stylesheet" href="styles.css" />
     <title>Grade Match</title>
   </head>
   <body>
-
     <div class="wrap">
       <header class="top">
         <div>
-          <p class="eyebrow"><span class="brand-mark" aria-hidden="true">G</span> COLOR WORKSPACE</p>
-          <h1>Grade Match</h1>
-          <p class="lede">
-            Match the tone of a reference photo.
+          <p class="eyebrow">
+            <span class="brand-mark" aria-hidden="true">G</span> COLOR WORKSPACE
           </p>
+          <h1>Grade Match</h1>
+          <p class="lede">Match the tone of a reference photo.</p>
         </div>
         <div class="top-actions">
-          <p class="privacy-note"><span class="privacy-dot"></span> Private by design · your photos stay on this device</p>
-          <button class="btn theme-toggle" type="button" id="theme-toggle" aria-pressed="true">
+          <p class="privacy-note">
+            <span class="privacy-dot"></span> Private by design · your photos
+            stay on this device
+          </p>
+          <button
+            class="btn theme-toggle"
+            type="button"
+            id="theme-toggle"
+            aria-pressed="true"
+          >
             <span aria-hidden="true">☼</span> Light appearance
           </button>
         </div>
@@ -29,7 +39,8 @@
         <section class="slots" aria-label="Photos">
           <div class="slot" id="slot-src">
             <div class="slot-head">
-              <span class="label"><span class="step-number">01</span> Your photo</span
+              <span class="label"
+                ><span class="step-number">01</span> Your photo</span
               ><span class="tag">ORIGINAL</span>
             </div>
             <label class="drop" id="drop-src">
@@ -39,7 +50,13 @@
                 height="3"
                 aria-label="Your photo preview"
               ></canvas>
-              <span class="hint"><span class="upload-icon" aria-hidden="true">↥</span><span><strong>Choose an image</strong><small>or drag and drop · JPG, PNG, WebP</small></span></span>
+              <span class="hint"
+                ><span class="upload-icon" aria-hidden="true">↥</span
+                ><span
+                  ><strong>Choose an image</strong
+                  ><small>or drag and drop · JPG, PNG, WebP</small></span
+                ></span
+              >
               <input
                 class="sr-only"
                 id="file-src"
@@ -55,7 +72,8 @@
           </div>
           <div class="slot" id="slot-ref">
             <div class="slot-head">
-              <span class="label"><span class="step-number">02</span> Reference</span
+              <span class="label"
+                ><span class="step-number">02</span> Reference</span
               ><span class="tag">YOUR INSPIRATION</span>
             </div>
             <label class="drop" id="drop-ref">
@@ -65,7 +83,13 @@
                 height="3"
                 aria-label="Reference photo preview"
               ></canvas>
-              <span class="hint"><span class="upload-icon" aria-hidden="true">↥</span><span><strong>Choose a reference</strong><small>or drag and drop · JPG, PNG, WebP</small></span></span>
+              <span class="hint"
+                ><span class="upload-icon" aria-hidden="true">↥</span
+                ><span
+                  ><strong>Choose a reference</strong
+                  ><small>or drag and drop · JPG, PNG, WebP</small></span
+                ></span
+              >
               <input
                 class="sr-only"
                 id="file-ref"
@@ -99,14 +123,20 @@
             ><span class="corner r">Matched</span>
           </div>
           <div class="stage-controls">
-            <div class="comparison-controls" role="group" aria-label="Comparison view">
-            <button class="btn small" type="button" data-pos="100">
-              Original
-            </button>
-            <button class="btn small" type="button" data-pos="50">Split</button>
-            <button class="btn small" type="button" data-pos="0">
-              Matched
-            </button>
+            <div
+              class="comparison-controls"
+              role="group"
+              aria-label="Comparison view"
+            >
+              <button class="btn small" type="button" data-pos="100">
+                Original
+              </button>
+              <button class="btn small" type="button" data-pos="50">
+                Split
+              </button>
+              <button class="btn small" type="button" data-pos="0">
+                Matched
+              </button>
             </div>
             <input
               id="split"
@@ -116,13 +146,26 @@
               value="50"
               aria-label="Before and after position"
             />
-            <button class="btn primary export-image" type="button" id="btn-export-image">
+            <button
+              class="btn primary export-image"
+              type="button"
+              id="btn-export-image"
+            >
               <span aria-hidden="true">↓</span> Download matched image
             </button>
           </div>
-          <p class="export-status" id="image-export-status" role="status" aria-live="polite"></p>
-          <p class="ai-status" id="ai-status" role="status" aria-live="polite">Checking for a trained local AI model…</p>
-          <p class="stage-caption">Drag the divider to compare · full-resolution export up to 4096 px</p>
+          <p
+            class="export-status"
+            id="image-export-status"
+            role="status"
+            aria-live="polite"
+          ></p>
+          <p class="ai-status" id="ai-status" role="status" aria-live="polite">
+            Checking for a trained local AI model…
+          </p>
+          <p class="stage-caption">
+            Drag the divider to compare · full-resolution export up to 4096 px
+          </p>
         </section>
 
         <section class="analysis panel" aria-label="Analysis">
@@ -155,8 +198,8 @@
             <ol>
               <li>
                 A trained model compares color and tone features from both
-                photos and predicts Lightroom-style settings. Inference runs
-                in this browser; photos are not sent to an AI service.
+                photos and predicts Lightroom-style settings. Inference runs in
+                this browser; photos are not sent to an AI service.
               </li>
               <li>
                 The model must first be trained locally on labeled examples:

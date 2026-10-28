@@ -1,0 +1,390 @@
+import argparse
+import json
+import math
+import random
+from pathlib import Path
+
+import numpy as np
+import torch
+from PIL import Image
+from torch import nn
+
+
+FEATURES_PER_IMAGE = 101
+INPUT_SIZE = FEATURES_PER_IMAGE * 2
+OUTPUT_SIZE = 50
+CURVE_X = (0, 32, 64, 128, 192, 224, 255)
+HUE_BANDS = (0, 30, 60, 120, 180, 240, 270, 315)
+HIST_BINS = 512
+QUANTILES = tuple(0.025 + index * 0.05 for index in range(20))
+
+
+def srgb_to_linear(rgb):
+    return np.where(rgb <= 0.04045, rgb / 12.92, ((rgb + 0.055) / 1.055) ** 2.4)
+
+
+def linear_to_oklab(rgb):
+    r, g, b = rgb[..., 0], rgb[..., 1], rgb[..., 2]
+    l = np.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b)
+    m = np.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b)
+    s = np.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b)
+    return np.stack(
+        (
+            0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s,
+            1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s,
+            0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s,
+        ),
+        axis=-1,
+    )
+
+
+def hsv_hue_to_oklab_angle(hue):
+    h = (hue % 360) / 60
+    c = 1.0
+    x = 1 - abs(h % 2 - 1)
+    sector = int(h)
+    rgb = ((c, x, 0), (x, c, 0), (0, c, x), (0, x, c), (x, 0, c), (c, 0, x))[sector]
+    lab = linear_to_oklab(srgb_to_linear(np.array(rgb, dtype=np.float64)))
+    return math.degrees(math.atan2(lab[2], lab[1])) % 360
+
+
+BAND_ANGLES = tuple(hsv_hue_to_oklab_angle(hue) for hue in HUE_BANDS)
+
+
+def histogram(values, low, high):
+    indices = ((values - low) / (high - low) * HIST_BINS).astype(np.int64)
+    return np.bincount(np.clip(indices, 0, HIST_BINS - 1), minlength=HIST_BINS).astype(
+        np.float64
+    )
+
+
+def histogram_quantile(counts, low, high, total, quantile):
+    target = quantile * total
+    accumulated = 0.0
+    for index, count in enumerate(counts):
+        next_accumulated = accumulated + count
+        if next_accumulated >= target:
+            fraction = (target - accumulated) / count if count > 0 else 0.5
+            return low + ((index + fraction) / HIST_BINS) * (high - low)
+        accumulated = next_accumulated
+    return high
+
+
+def analyze_image(path):
+    with Image.open(path) as image:
+        image = image.convert("RGB")
+        image.thumbnail((256, 256), Image.Resampling.LANCZOS)
+        rgb = np.asarray(image, dtype=np.float64) / 255.0
+
+    linear = srgb_to_linear(rgb)
+    lab = linear_to_oklab(linear.reshape(-1, 3))
+    lightness, a, b = lab.T
+    chroma = np.sqrt(a * a + b * b)
+    total = len(lightness)
+
+    y = 0.2126 * linear[..., 0] + 0.7152 * linear[..., 1] + 0.0722 * linear[..., 2]
+    y = np.where(y <= 0.0031308, 12.92 * y, 1.055 * np.power(y, 1 / 2.4) - 0.055)
+    value_hist = histogram(y.reshape(-1), 0, 1)
+    light_hist = histogram(lightness, 0, 1)
+    a_hist = histogram(a, -0.4, 0.4)
+    b_hist = histogram(b, -0.4, 0.4)
+    chroma_hist = histogram(chroma, 0, 0.4)
+
+    luminance_quantiles = [
+        histogram_quantile(value_hist, 0, 1, total, q) for q in QUANTILES
+    ]
+    a_quantiles = [histogram_quantile(a_hist, -0.4, 0.4, total, q) for q in QUANTILES]
+    b_quantiles = [histogram_quantile(b_hist, -0.4, 0.4, total, q) for q in QUANTILES]
+
+    zone_weights = np.stack(
+        (
+            1 - smooth_array(lightness, 0.25, 0.65),
+            np.exp(-((lightness - 0.55) / 0.2) ** 2),
+            smooth_array(lightness, 0.45, 0.85),
+        ),
+        axis=1,
+    )
+    zone = []
+    for weights in zone_weights.T:
+        weight_sum = float(weights.sum())
+        zone.extend(
+            (
+                weight_sum / total,
+                float(np.dot(weights, a) / weight_sum) if weight_sum else 0.0,
+                float(np.dot(weights, b) / weight_sum) if weight_sum else 0.0,
+            )
+        )
+
+    band_share = np.zeros(8)
+    band_chroma = np.zeros(8)
+    band_hue_delta = np.zeros(8)
+    band_lightness = np.zeros(8)
+    angles = np.degrees(np.arctan2(b, a)) % 360
+    for index in np.flatnonzero(chroma > 0.02):
+        angle = angles[index]
+        if angle < BAND_ANGLES[0]:
+            angle += 360
+        band_index = 7
+        for candidate in range(7):
+            if angle < BAND_ANGLES[candidate + 1]:
+                band_index = candidate
+                break
+        next_index = 0 if band_index == 7 else band_index + 1
+        start = BAND_ANGLES[band_index]
+        end = BAND_ANGLES[band_index + 1] if band_index < 7 else BAND_ANGLES[0] + 360
+        t = (angle - start) / (end - start)
+        t = t * t * (3 - 2 * t)
+        for band, weight, delta in (
+            (band_index, 1 - t, angle - start),
+            (next_index, t, angle - end),
+        ):
+            weighted_chroma = weight * chroma[index]
+            band_share[band] += weight
+            band_chroma[band] += weighted_chroma
+            band_hue_delta[band] += weighted_chroma * delta
+            band_lightness[band] += weighted_chroma * lightness[index]
+
+    bands = []
+    for index in range(8):
+        share = band_share[index]
+        chroma_sum = band_chroma[index]
+        bands.extend(
+            (
+                share / total,
+                chroma_sum / share if share else 0.0,
+                band_hue_delta[index] / chroma_sum if chroma_sum else 0.0,
+                band_lightness[index] / chroma_sum if chroma_sum else 0.0,
+            )
+        )
+
+    stats = {
+        "dq": luminance_quantiles + a_quantiles + b_quantiles,
+        "band": bands,
+        "zone": zone,
+        "value_hist": value_hist,
+        "light_hist": light_hist,
+        "a_hist": a_hist,
+        "b_hist": b_hist,
+        "chroma_hist": chroma_hist,
+        "total": total,
+    }
+    return stats
+
+
+def smooth_array(values, low, high):
+    t = np.clip((values - low) / (high - low), 0, 1)
+    return t * t * (3 - 2 * t)
+
+
+def features_from_stats(stats):
+    quantiles = stats["dq"]
+    values = (
+        quantiles[:20]
+        + [value / 0.4 for value in quantiles[20:40]]
+        + [value / 0.4 for value in quantiles[40:60]]
+    )
+    for index in range(8):
+        share, chroma, hue_delta, lightness = stats["band"][index * 4 : index * 4 + 4]
+        values.extend((share, chroma / 0.4, hue_delta / 45, lightness))
+    for index in range(3):
+        share, a, b = stats["zone"][index * 3 : index * 3 + 3]
+        values.extend((share, a / 0.4, b / 0.4))
+    if len(values) != FEATURES_PER_IMAGE:
+        raise ValueError(f"Expected {FEATURES_PER_IMAGE} image features; got {len(values)}")
+    return values
+
+
+def validate_range(value, low, high, label):
+    number = float(value)
+    if not math.isfinite(number) or not low <= number <= high:
+        raise ValueError(f"{label} must be a finite number from {low} to {high}.")
+    return number
+
+
+def target_vector(settings, sample_number):
+    label = f"sample {sample_number} settings"
+    values = []
+    for key, limit in (
+        ("temp", 100),
+        ("tint", 100),
+        ("exposure", 5),
+        ("contrast", 100),
+        ("highlights", 100),
+        ("shadows", 100),
+        ("whites", 100),
+        ("blacks", 100),
+        ("vibrance", 100),
+        ("saturation", 100),
+    ):
+        values.append(validate_range(settings[key], -limit, limit, f"{label}.{key}") / limit)
+
+    curve = settings["curve"]
+    if len(curve) != len(CURVE_X):
+        raise ValueError(f"{label}.curve must contain {len(CURVE_X)} output values.")
+    values.extend(
+        validate_range(value, 0, 255, f"{label}.curve[{index}]") / 127.5 - 1
+        for index, value in enumerate(curve)
+    )
+
+    hsl = settings["hsl"]
+    if len(hsl) != 8:
+        raise ValueError(f"{label}.hsl must contain exactly 8 color-band objects.")
+    for index, band in enumerate(hsl):
+        for key in ("h", "s", "l"):
+            values.append(
+                validate_range(band[key], -100, 100, f"{label}.hsl[{index}].{key}") / 100
+            )
+
+    grade = settings["grade"]
+    for key in ("sh", "mid", "hi"):
+        hue = validate_range(grade[key]["hue"], 0, 360, f"{label}.grade.{key}.hue")
+        saturation = validate_range(
+            grade[key]["sat"], 0, 100, f"{label}.grade.{key}.sat"
+        )
+        radians = math.radians(hue)
+        values.extend((math.cos(radians), math.sin(radians), saturation / 50 - 1))
+
+    if len(values) != OUTPUT_SIZE:
+        raise ValueError(f"Expected {OUTPUT_SIZE} model targets; got {len(values)}")
+    return values
+
+
+def load_dataset(manifest_path):
+    base = manifest_path.parent
+    features, targets = [], []
+    with manifest_path.open(encoding="utf-8") as manifest:
+        for line_number, line in enumerate(manifest, start=1):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+                source_path = (base / row["source"]).resolve()
+                reference_path = (base / row["reference"]).resolve()
+                source_features = features_from_stats(analyze_image(source_path))
+                reference_features = features_from_stats(analyze_image(reference_path))
+                features.append(source_features + reference_features)
+                targets.append(target_vector(row["settings"], len(targets) + 1))
+            except (KeyError, TypeError, ValueError, OSError, json.JSONDecodeError) as error:
+                raise ValueError(
+                    f"{manifest_path}:{line_number}: invalid training row: {error}"
+                ) from error
+    if len(features) < 5:
+        raise ValueError(
+            f"At least 5 labeled examples are required; found {len(features)}."
+        )
+    return np.asarray(features, dtype=np.float32), np.asarray(targets, dtype=np.float32)
+
+
+class ColorMatcher(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.layers = nn.Sequential(
+            nn.Linear(INPUT_SIZE, 128),
+            nn.ReLU(),
+            nn.Linear(128, 128),
+            nn.ReLU(),
+            nn.Linear(128, OUTPUT_SIZE),
+            nn.Tanh(),
+        )
+
+    def forward(self, features):
+        return self.layers(features)
+
+
+def train(manifest_path, output_path, epochs, seed):
+    torch.manual_seed(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    x, y = load_dataset(manifest_path)
+
+    indices = np.random.permutation(len(x))
+    validation_count = max(1, round(len(x) * 0.2))
+    validation_indices = indices[:validation_count]
+    training_indices = indices[validation_count:]
+    train_x = torch.from_numpy(x[training_indices])
+    train_y = torch.from_numpy(y[training_indices])
+    validation_x = torch.from_numpy(x[validation_indices])
+    validation_y = torch.from_numpy(y[validation_indices])
+
+    model = ColorMatcher()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=0.0001)
+    loss_function = nn.MSELoss()
+    best_loss = float("inf")
+    best_weights = None
+    best_epoch = 0
+    patience = 40
+    stale_epochs = 0
+
+    for epoch in range(1, epochs + 1):
+        model.train()
+        optimizer.zero_grad()
+        loss = loss_function(model(train_x), train_y)
+        loss.backward()
+        optimizer.step()
+
+        model.eval()
+        with torch.no_grad():
+            validation_loss = loss_function(model(validation_x), validation_y).item()
+        if validation_loss < best_loss:
+            best_loss = validation_loss
+            best_weights = {key: value.detach().clone() for key, value in model.state_dict().items()}
+            best_epoch = epoch
+            stale_epochs = 0
+        else:
+            stale_epochs += 1
+        if stale_epochs >= patience:
+            break
+
+    model.load_state_dict(best_weights)
+    model.eval()
+    with torch.no_grad():
+        predictions = model(validation_x).numpy()
+    mae_by_output = np.abs(predictions - validation_y.numpy()).mean(axis=0)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    example = torch.zeros((1, INPUT_SIZE), dtype=torch.float32)
+    torch.onnx.export(
+        model,
+        example,
+        output_path,
+        input_names=["features"],
+        output_names=["settings"],
+        dynamic_axes={"features": {0: "batch"}, "settings": {0: "batch"}},
+        opset_version=17,
+        dynamo=False,
+    )
+    report = {
+        "examples": len(x),
+        "trainingExamples": len(training_indices),
+        "validationExamples": len(validation_indices),
+        "bestEpoch": best_epoch,
+        "validationMse": best_loss,
+        "meanNormalizedAbsoluteError": float(mae_by_output.mean()),
+        "model": str(output_path),
+        "inputFeatures": INPUT_SIZE,
+        "outputSettings": OUTPUT_SIZE,
+    }
+    print(json.dumps(report, indent=2))
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Train the local Grade Match model and export it for browser inference."
+    )
+    parser.add_argument("--manifest", type=Path, required=True, help="Labeled JSONL dataset.")
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("public/models/color_matcher.onnx"),
+        help="ONNX output path (default: public/models/color_matcher.onnx).",
+    )
+    parser.add_argument("--epochs", type=int, default=400)
+    parser.add_argument("--seed", type=int, default=23)
+    args = parser.parse_args()
+    if args.epochs < 1:
+        parser.error("--epochs must be positive.")
+    train(args.manifest.resolve(), args.output.resolve(), args.epochs, args.seed)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,19 @@
+{
+  "name": "grade-match",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "build:single": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "onnxruntime-web": "^1.23.0"
+  },
+  "devDependencies": {
+    "vite": "^6.4.1",
+    "vite-plugin-singlefile": "^2.3.4"
+  }
+}

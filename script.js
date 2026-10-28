@@ -942,6 +942,8 @@ ${attrs}
       const MODEL_INPUT_SIZE = MODEL_FEATURES_PER_IMAGE * 2;
       const MODEL_OUTPUT_SIZE = 50;
       const MODEL_CURVE_X = [0, 32, 64, 128, 192, 224, 255];
+      const TRAINING_TEACHER_MODE =
+        new URLSearchParams(location.search).get("trainingTeacher") === "1";
 
       function modelFeatures(stats) {
         const q = stats.dq,
@@ -1393,9 +1395,13 @@ ${attrs}
               params: settingsFromModelOutput(
                 result[state.model.outputNames[0]].data,
               ),
+              calculation: solve(
+                state.src.smallLin,
+                state.src.sn,
+                state.ref.stats,
+                { modules: state.mods },
+              ),
             };
-            $("#ai-status").textContent =
-              "Experimental synthetic AI loaded · see README for validation limits";
           } catch (error) {
             if (tk !== state.token) return;
             console.error("AI inference failed; switching to the local solver.", error);
@@ -1419,16 +1425,40 @@ ${attrs}
         const sv = state.solved,
           s = state.src;
         if (!sv) return;
-        state.final = finalizeParams(sv.params, state.strength, state.mods);
-        const tmp = new Float32Array(s.sn * 3);
-        process(s.smallLin, s.sn, state.final, tmp);
-        const after = analyze(tmp, s.sn);
-        state.after = after;
-        state.afterPal = palette(tmp, s.sn, 6);
+        const evaluate = (params, method) => {
+          const final = finalizeParams(params, state.strength, state.mods),
+            pixels = new Float32Array(s.sn * 3);
+          process(s.smallLin, s.sn, final, pixels);
+          const stats = analyze(pixels, s.sn);
+          return {
+            final,
+            pixels,
+            stats,
+            distance: distance(stats, state.ref.stats),
+            method,
+          };
+        };
+        let selected = evaluate(sv.params, state.model ? "AI" : "JavaScript");
+        if (sv.calculation) {
+          const calculation = evaluate(sv.calculation.params, "JavaScript");
+          if (calculation.distance < selected.distance) selected = calculation;
+        }
+        state.final = selected.final;
+        state.after = selected.stats;
+        state.afterPal = palette(selected.pixels, s.sn, 6);
         state.metrics = {
           before: distance(s.stats, state.ref.stats),
-          after: distance(after, state.ref.stats),
+          after: selected.distance,
         };
+        if (sv.calculation) {
+          $("#ai-status").textContent =
+            selected.method === "AI"
+              ? "AI model selected · closer than the calculation-based matcher"
+              : "AI model loaded · calculation-based matcher selected as closer";
+        } else if (state.model) {
+          $("#ai-status").textContent =
+            "Experimental synthetic AI loaded · see README for validation limits";
+        }
         state.uuid = (
           window.crypto && crypto.randomUUID
             ? crypto.randomUUID()
@@ -1897,6 +1927,128 @@ ${attrs}
       }
       async function initializeModel() {
         try {
+          if (TRAINING_TEACHER_MODE) {
+            window.gradeMatchTrainingTeacher = async (sourceUrl, referenceUrl) => {
+              const loadStats = async (url) => {
+                const response = await fetch(url);
+                if (!response.ok) {
+                  throw new Error(
+                    `Training image request failed with HTTP ${response.status}.`,
+                  );
+                }
+                const bitmap = await createImageBitmap(await response.blob());
+                const scale = Math.min(
+                  1,
+                  256 / Math.max(bitmap.width, bitmap.height),
+                );
+                const canvas = document.createElement("canvas");
+                canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+                canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+                const context = canvas.getContext("2d", {
+                  willReadFrequently: true,
+                });
+                context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+                const count = canvas.width * canvas.height;
+                const linear = rgbaToLinear(
+                  context.getImageData(0, 0, canvas.width, canvas.height).data,
+                  count,
+                );
+                return { linear, count, stats: analyze(linear, count) };
+              };
+              const [source, reference] = await Promise.all([
+                loadStats(sourceUrl),
+                loadStats(referenceUrl),
+              ]);
+              const { params } = solve(
+                source.linear,
+                source.count,
+                reference.stats,
+                { modules: ALL_MODS() },
+              );
+              return {
+                temp: params.temp,
+                tint: params.tint,
+                exposure: params.exposure,
+                contrast: params.contrast,
+                highlights: params.highlights,
+                shadows: params.shadows,
+                whites: params.whites,
+                blacks: params.blacks,
+                vibrance: params.vibrance,
+                saturation: params.saturation,
+                curve: params.curve.map((point) => point[1]),
+                hsl: params.hsl,
+                grade: params.grade,
+              };
+            };
+            $("#ai-status").textContent =
+              "Training teacher mode · the JavaScript solver is providing labels";
+            if (
+              new URLSearchParams(location.search).get("collectTeacherLabels") ===
+              "1"
+            ) {
+              const serverUrl =
+                new URLSearchParams(location.search).get("teacherServer") ||
+                "http://127.0.0.1:8765";
+              const status = $("#ai-status");
+              const startOffset = Number(
+                new URLSearchParams(location.search).get("teacherOffset") || 0,
+              );
+              const initialResponse = await fetch(
+                `${serverUrl}/pairs?offset=${startOffset}&limit=1`,
+              );
+              if (!initialResponse.ok) {
+                throw new Error(
+                  `Teacher server request failed with HTTP ${initialResponse.status}.`,
+                );
+              }
+              const { total } = await initialResponse.json();
+              if (!Number.isInteger(startOffset) || startOffset < 0 || startOffset > total) {
+                throw new Error("The teacher-label resume offset is invalid.");
+              }
+              for (let offset = startOffset; offset < total; offset += 25) {
+                const batchSize = Math.min(25, total - offset);
+                const response = await fetch(
+                  `${serverUrl}/pairs?offset=${offset}&limit=${batchSize}`,
+                );
+                if (!response.ok) {
+                  throw new Error(
+                    `Teacher pair request failed with HTTP ${response.status}.`,
+                  );
+                }
+                const { pairs } = await response.json();
+                const labels = [];
+                for (const pair of pairs) {
+                  const sourceUrl = `${serverUrl}/image?path=${encodeURIComponent(pair.source)}`;
+                  const referenceUrl = `${serverUrl}/image?path=${encodeURIComponent(pair.reference)}`;
+                  labels.push({
+                    ...pair,
+                    settings: await window.gradeMatchTrainingTeacher(
+                      sourceUrl,
+                      referenceUrl,
+                    ),
+                  });
+                }
+                const saveResponse = await fetch(`${serverUrl}/labels`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify(labels),
+                });
+                if (!saveResponse.ok) {
+                  const error = await saveResponse.json();
+                  throw new Error(
+                    `Saving teacher labels failed with HTTP ${saveResponse.status}: ${error.error}`,
+                  );
+                }
+                const progress = await saveResponse.json();
+                status.textContent =
+                  `Collecting JavaScript teacher labels · ${progress.labeledPairs}/${progress.totalPairs}`;
+              }
+              status.textContent =
+                "JavaScript teacher-label collection complete · check the local training server";
+            }
+            return;
+          }
           const response = await fetch("/models/color_matcher.onnx");
           const contentType = response.headers.get("content-type") || "";
           if (response.status === 404 || contentType.includes("text/html")) {
@@ -1918,9 +2070,15 @@ ${attrs}
             if (state.src && state.ref) await recompute();
           }
         } catch (error) {
-          console.error("Could not load the local AI model.", error);
-          $("#ai-status").textContent =
-            "AI model could not be loaded. Using the existing calculation-based matcher (not AI). See the console for details.";
+          if (TRAINING_TEACHER_MODE) {
+            console.error("JavaScript teacher-label collection failed.", error);
+            $("#ai-status").textContent =
+              "Teacher-label collection failed. See the console and resume from the local server's labeled-pair count.";
+          } else {
+            console.error("Could not load the local AI model.", error);
+            $("#ai-status").textContent =
+              "AI model could not be loaded. Using the existing calculation-based matcher (not AI). See the console for details.";
+          }
         }
       }
 

@@ -37,9 +37,9 @@ The single-file build is written to `dist/Grade Match.html`. It can be opened in
 
 The optional AI is a supervised neural network trained locally with Python and exported to ONNX. The browser runs ONNX inference using ONNX Runtime Web. The model accepts summaries of the source and reference images and predicts 50 Lightroom-style adjustment values.
 
-The model is trained locally from synthetic adjustments to the TensorFlow Flower Photos set. It varies ten basic settings; tone-curve, HSL, and color-grading targets are neutral. This teaches the model a limited slider-recovery task, not expert retouching, and the flower-only training domain does not establish accuracy on portraits, landscapes, or arbitrary cross-scene matching. See the training guide and attribution files for details.
+The model is trained locally to imitate the JavaScript color-matching solver on synthetic same-photo flower pairs. The browser runs both the ONNX model and the calculation matcher, then selects the result with the lower measured distance to the reference. This quality guard means the UI can use JavaScript when it outperforms the current model; the status message identifies which result was selected. This is not a claim that the neural network is more accurate than its teacher. See the training guide and attribution files for details.
 
-This workspace has a trained, local-only model at `public\models\color_matcher.onnx`: 11,010 synthetic pairs from 3,670 credited photos, with 2,202 held-out validation pairs. Its validation MAE is only modestly better than predicting zero adjustments for most sliders, so treat it as a training-pipeline demonstration, not a reliable general-purpose matcher. The model and dataset are Git-ignored and will not be present in a fresh clone.
+The compact model uses 1,000 solver-labeled pairs from the CC BY 2.0 flower set (800 training / 200 held-out photos). In a held-out preview comparison, the AI alone reduced the app's reference-distance metric by 62%, versus 96% for the JavaScript solver; the app therefore selects the solver on that example. The model and detailed training statistics are local under `public\models\color_matcher.onnx` and `dataset\flower_match\`; both are Git-ignored and will not be present in a fresh clone. See [the training curve](docs/training_curves.svg) and [validation report](docs/ai-training.md#training-report-and-graph).
 
 For training details, dataset format, and limitations, see [docs/ai-training.md](docs/ai-training.md).
 
@@ -55,7 +55,7 @@ python prepare_synthetic_training.py
 python train_color_matcher.py --manifest dataset\flower_match\train.jsonl --output public\models\color_matcher.onnx
 ```
 
-The preparation script downloads TensorFlow's 218 MB Flower Photos archive and generates synthetic labeled edits locally. It produces about 11,000 pairs from 3,670 flower photographs. This is enough to train and validate the pipeline, but it is flower-domain data with synthetic settings, not expert retouching or proof of general photo-style matching. The photos are CC BY 2.0; keep the generated attribution file with the local dataset and review the license before redistribution. The dataset and trained model are ignored by Git.
+The preparation script downloads TensorFlow's 218 MB Flower Photos archive and generates three synthetic edits of each of 3,670 flower photos. Training and validation use separate source photos. The labels are synthetic, not expert retouching or proof of general photo-style matching. The photos are CC BY 2.0; keep the generated attribution file with the local dataset and review the license before redistribution. The dataset and trained model are ignored by Git.
 
 For your own dataset, each JSONL training example needs a source image, a reference image, and the desired adjustment settings. See the training guide for the full schema and instructions.
 

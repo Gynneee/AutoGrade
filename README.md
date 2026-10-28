@@ -66,12 +66,6 @@ For your own dataset, each JSONL training example needs a source image, a refere
 
 The model does not generate pixels directly. It predicts adjustment controls; the app applies those controls to the source image.
 
-## Related project: `hahnec/color-matcher`
-
-[`hahnec/color-matcher`](https://github.com/hahnec/color-matcher) is a Python image-to-image color-transfer library. It offers algorithmic methods such as histogram matching, Reinhard transfer, MKL, and multivariate Gaussian transfer, with command-line and Python API usage. It can transfer the color distribution of a reference image directly onto a source image; it does not require training a neural network for those methods.
-
-Grade Match is a browser editing application rather than a general-purpose Python library. Its optional AI is trained to predict editable Lightroom-style settings from paired image features and labeled adjustments. Until a sufficiently large, representative dataset is prepared and a model is installed, its normal matching path is the built-in calculation-based matcher. The two projects therefore use different approaches and are not the same model or interchangeable implementations.
-
 ## Project files
 
 - `Grade Match.html` — app interface.

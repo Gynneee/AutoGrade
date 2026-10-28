@@ -1355,6 +1355,12 @@ ${attrs}
         $("#cv-after").style.clipPath = "inset(0 0 0 " + pct + "%)";
         $("#divider").style.left = pct + "%";
         $("#split").value = String(Math.round(pct));
+        document.querySelectorAll("[data-pos]").forEach((button) => {
+          button.setAttribute(
+            "aria-pressed",
+            String(+button.dataset.pos === Math.round(pct)),
+          );
+        });
       }
       function schedulePreview() {
         if (rafPending) return;
@@ -1831,7 +1837,7 @@ ${attrs}
 
       function wire() {
         const themeToggle = $("#theme-toggle");
-        document.documentElement.dataset.theme = "light";
+        document.documentElement.dataset.theme = "dark";
         themeToggle.addEventListener("click", () => {
           const dark = document.documentElement.dataset.theme !== "dark";
           document.documentElement.dataset.theme = dark ? "dark" : "light";

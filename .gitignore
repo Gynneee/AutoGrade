@@ -4,3 +4,4 @@ public/models/*.onnx
 dataset/
 __pycache__/
 .venv/
+local-report/

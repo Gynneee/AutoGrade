@@ -351,7 +351,56 @@ def write_training_graph(output_dir, history):
 """
     graph_path = output_dir / "training_curves.svg"
     graph_path.write_text(svg, encoding="utf-8")
-    return graph_path
+    mae_graph_path = output_dir.parent / "local-report" / "training_mae_curves.svg"
+    if all("validationMae" in row and "trainingMae" in row for row in history):
+        mae_graph_path.parent.mkdir(parents=True, exist_ok=True)
+        largest_mae = max(
+            max(row["trainingMae"], row["validationMae"]) for row in history
+        )
+        mae_max = max(0.01, math.ceil(largest_mae * 100) / 100)
+
+        def mae_point(index, mae):
+            x = left + (index / max(1, len(history) - 1)) * plot_width
+            y = top + (1 - mae / mae_max) * plot_height
+            return f"{x:.1f},{y:.1f}"
+
+        training_mae_points = " ".join(
+            mae_point(index, row["trainingMae"])
+            for index, row in enumerate(history)
+        )
+        validation_mae_points = " ".join(
+            mae_point(index, row["validationMae"])
+            for index, row in enumerate(history)
+        )
+        mae_grid = []
+        for step in range(6):
+            fraction = step / 5
+            y = top + fraction * plot_height
+            value = mae_max * (1 - fraction)
+            mae_grid.append(
+                f'<line x1="{left}" y1="{y:.1f}" x2="{left + plot_width}" '
+                f'y2="{y:.1f}" stroke="#d7dee8"/><text x="{left - 10}" '
+                f'y="{y + 4:.1f}" text-anchor="end" font-size="12">{value:.3f}</text>'
+            )
+        mae_svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">
+<rect width="100%" height="100%" fill="white"/>
+<text x="{width / 2}" y="22" text-anchor="middle" font-family="sans-serif" font-size="18">Training and validation normalized MAE</text>
+{''.join(mae_grid)}
+<line x1="{left}" y1="{top + plot_height}" x2="{left + plot_width}" y2="{top + plot_height}" stroke="#263445"/>
+<line x1="{left}" y1="{top}" x2="{left}" y2="{top + plot_height}" stroke="#263445"/>
+<polyline fill="none" stroke="#2463eb" stroke-width="2.5" points="{training_mae_points}"/>
+<polyline fill="none" stroke="#e05a36" stroke-width="2.5" points="{validation_mae_points}"/>
+<text x="{left}" y="{height - 42}" font-family="sans-serif" font-size="13">Epoch 1</text>
+<text x="{left + plot_width}" y="{height - 42}" text-anchor="end" font-family="sans-serif" font-size="13">Epoch {len(history)}</text>
+<line x1="{width - 250}" y1="{height - 38}" x2="{width - 222}" y2="{height - 38}" stroke="#2463eb" stroke-width="3"/>
+<text x="{width - 214}" y="{height - 34}" font-family="sans-serif" font-size="13">Training MAE</text>
+<line x1="{width - 130}" y1="{height - 38}" x2="{width - 102}" y2="{height - 38}" stroke="#e05a36" stroke-width="3"/>
+<text x="{width - 94}" y="{height - 34}" font-family="sans-serif" font-size="13">Validation MAE</text>
+<text x="20" y="{top + plot_height / 2}" transform="rotate(-90 20 {top + plot_height / 2})" text-anchor="middle" font-family="sans-serif" font-size="13">Mean absolute error (normalized)</text>
+</svg>
+"""
+        mae_graph_path.write_text(mae_svg, encoding="utf-8")
+    return graph_path, mae_graph_path
 
 
 class ColorMatcher(nn.Module):
@@ -426,12 +475,27 @@ def train(manifest_path, output_path, epochs, seed):
 
         model.eval()
         with torch.no_grad():
-            validation_loss = loss_function(model(validation_x), validation_y).item()
+            epoch_training_predictions = model(train_x)
+            epoch_validation_predictions = model(validation_x)
+            training_loss = loss_function(
+                epoch_training_predictions, train_y
+            ).item()
+            validation_loss = loss_function(
+                epoch_validation_predictions, validation_y
+            ).item()
+            training_mae = torch.abs(
+                epoch_training_predictions - train_y
+            ).mean().item()
+            validation_mae = torch.abs(
+                epoch_validation_predictions - validation_y
+            ).mean().item()
         history.append(
             {
                 "epoch": epoch,
-                "trainingLoss": float(loss.item()),
+                "trainingLoss": float(training_loss),
                 "validationLoss": float(validation_loss),
+                "trainingMae": float(training_mae),
+                "validationMae": float(validation_mae),
             }
         )
         if validation_loss < best_loss:
@@ -443,8 +507,9 @@ def train(manifest_path, output_path, epochs, seed):
             stale_epochs += 1
         if epoch == 1 or epoch % 25 == 0:
             print(
-                f"Epoch {epoch}/{epochs}: training loss={loss.item():.6f}, "
-                f"validation loss={validation_loss:.6f}.",
+                f"Epoch {epoch}/{epochs}: training MSE={training_loss:.6f}, "
+                f"validation MSE={validation_loss:.6f}, "
+                f"validation MAE={validation_mae:.6f}.",
                 flush=True,
             )
         if stale_epochs >= patience:
@@ -473,16 +538,20 @@ def train(manifest_path, output_path, epochs, seed):
     )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    graph_path = write_training_graph(
+    graph_path, mae_graph_path = write_training_graph(
         Path(__file__).resolve().parent / "docs", history
     )
     history_path = manifest_path.parent / "training_history.csv"
     with history_path.open("w", encoding="utf-8", newline="") as history_file:
-        history_file.write("epoch,training_mse,validation_mse\n")
+        history_file.write(
+            "epoch,training_mse,validation_mse,training_normalized_mae,"
+            "validation_normalized_mae\n"
+        )
         for row in history:
             history_file.write(
                 f"{row['epoch']},{row['trainingLoss']:.9f},"
-                f"{row['validationLoss']:.9f}\n"
+                f"{row['validationLoss']:.9f},{row['trainingMae']:.9f},"
+                f"{row['validationMae']:.9f}\n"
             )
     example = torch.zeros((1, INPUT_SIZE), dtype=torch.float32)
     torch.onnx.export(
@@ -535,6 +604,7 @@ def train(manifest_path, output_path, epochs, seed):
     report["report"] = str(report_path)
     report["trainingHistory"] = str(history_path)
     report["trainingGraph"] = str(graph_path)
+    report["trainingMaeGraph"] = str(mae_graph_path)
     report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report, indent=2))
 

@@ -33,6 +33,18 @@ python train_color_matcher.py --manifest dataset\train.jsonl
 
 The trainer requires at least five labeled examples to run and keeps a validation split. Five is only a technical minimum, not enough to expect reliable color matching; use many varied examples and keep genuinely separate photos for evaluation. It prints validation metrics and exports `public/models/color_matcher.onnx`. These metrics are a smoke check, not a guarantee of perceptual quality.
 
+### Try a small FiveK sample
+
+You do not need the 50 GB archive for a first pipeline test. The project can download five individual FiveK examples (DNG plus one expert TIFF each), convert them locally, and read the Lightroom settings embedded in the TIFF metadata:
+
+```powershell
+python -m pip install -r requirements-train.txt
+python prepare_fivek_sample.py
+python train_color_matcher.py --manifest dataset\fivek_sample\train.jsonl --output dataset\fivek_sample\color_matcher_trial.onnx
+```
+
+The sample is only a smoke test: five photos are far too few to evaluate generalization, and the output model is kept under `dataset\` rather than enabled in the website. Some older Lightroom settings do not map directly to this app's controls, so the preparation script uses neutral values for unsupported controls such as temperature. FiveK is licensed for research use only; retain the included license files, do not use the sample for commercial purposes, and do not upload its images or model to GitHub.
+
 ## Run the app
 
 For a single HTML file you can open directly, run:

@@ -120,29 +120,33 @@ def analyze_image(path):
     band_hue_delta = np.zeros(8)
     band_lightness = np.zeros(8)
     angles = np.degrees(np.arctan2(b, a)) % 360
-    for index in np.flatnonzero(chroma > 0.02):
-        angle = angles[index]
-        if angle < BAND_ANGLES[0]:
-            angle += 360
-        band_index = 7
-        for candidate in range(7):
-            if angle < BAND_ANGLES[candidate + 1]:
-                band_index = candidate
-                break
-        next_index = 0 if band_index == 7 else band_index + 1
-        start = BAND_ANGLES[band_index]
-        end = BAND_ANGLES[band_index + 1] if band_index < 7 else BAND_ANGLES[0] + 360
-        t = (angle - start) / (end - start)
-        t = t * t * (3 - 2 * t)
-        for band, weight, delta in (
-            (band_index, 1 - t, angle - start),
-            (next_index, t, angle - end),
-        ):
-            weighted_chroma = weight * chroma[index]
-            band_share[band] += weight
-            band_chroma[band] += weighted_chroma
-            band_hue_delta[band] += weighted_chroma * delta
-            band_lightness[band] += weighted_chroma * lightness[index]
+    valid = np.flatnonzero(chroma > 0.02)
+    valid_angles = (angles[valid] - BAND_ANGLES[0]) % 360 + BAND_ANGLES[0]
+    valid_angles = np.minimum(
+        valid_angles, np.nextafter(BAND_ANGLES[0] + 360, BAND_ANGLES[0])
+    )
+    boundaries = np.asarray(BAND_ANGLES[1:] + (BAND_ANGLES[0] + 360,))
+    band_index = np.searchsorted(boundaries, valid_angles, side="right")
+    next_index = (band_index + 1) % 8
+    start = np.asarray(BAND_ANGLES)[band_index]
+    end = boundaries[band_index]
+    t = (valid_angles - start) / (end - start)
+    t = t * t * (3 - 2 * t)
+    selected_chroma = chroma[valid]
+    selected_lightness = lightness[valid]
+    for band, weights, delta in (
+        (band_index, 1 - t, valid_angles - start),
+        (next_index, t, valid_angles - end),
+    ):
+        weighted_chroma = weights * selected_chroma
+        band_share += np.bincount(band, weights=weights, minlength=8)
+        band_chroma += np.bincount(band, weights=weighted_chroma, minlength=8)
+        band_hue_delta += np.bincount(
+            band, weights=weighted_chroma * delta, minlength=8
+        )
+        band_lightness += np.bincount(
+            band, weights=weighted_chroma * selected_lightness, minlength=8
+        )
 
     bands = []
     for index in range(8):

@@ -1395,7 +1395,7 @@ ${attrs}
               ),
             };
             $("#ai-status").textContent =
-              "Trained AI model · runs locally in this browser";
+              "Experimental synthetic AI loaded · see README for validation limits";
           } catch (error) {
             if (tk !== state.token) return;
             console.error("AI inference failed; switching to the local solver.", error);
@@ -1906,12 +1906,15 @@ ${attrs}
             throw new Error(`Model request failed with HTTP ${response.status}.`);
           } else {
             const modelBytes = await response.arrayBuffer();
+            if (import.meta.env.DEV) {
+              ort.env.wasm.wasmPaths = "/node_modules/onnxruntime-web/dist/";
+            }
             ort.env.wasm.numThreads = 1;
             state.model = await ort.InferenceSession.create(modelBytes, {
               executionProviders: ["wasm"],
             });
             $("#ai-status").textContent =
-              "Trained AI model loaded · running locally in this browser";
+              "Experimental synthetic AI loaded · see README for validation limits";
             if (state.src && state.ref) await recompute();
           }
         } catch (error) {

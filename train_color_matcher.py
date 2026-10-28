@@ -255,7 +255,10 @@ def target_vector(settings, sample_number):
 
 def load_dataset(manifest_path):
     base = manifest_path.parent
-    features, targets = [], []
+    features, targets, groups, splits = [], [], [], []
+    image_features = {}
+    with manifest_path.open(encoding="utf-8") as manifest:
+        total_rows = sum(1 for line in manifest if line.strip())
     with manifest_path.open(encoding="utf-8") as manifest:
         for line_number, line in enumerate(manifest, start=1):
             if not line.strip():
@@ -264,10 +267,23 @@ def load_dataset(manifest_path):
                 row = json.loads(line)
                 source_path = (base / row["source"]).resolve()
                 reference_path = (base / row["reference"]).resolve()
-                source_features = features_from_stats(analyze_image(source_path))
-                reference_features = features_from_stats(analyze_image(reference_path))
+                for image_path in (source_path, reference_path):
+                    if image_path not in image_features:
+                        image_features[image_path] = features_from_stats(
+                            analyze_image(image_path)
+                        )
+                source_features = image_features[source_path]
+                reference_features = image_features[reference_path]
                 features.append(source_features + reference_features)
                 targets.append(target_vector(row["settings"], len(targets) + 1))
+                groups.append(str(row.get("group", row["source"])))
+                splits.append(str(row.get("split", "")))
+                if len(features) % 500 == 0:
+                    print(
+                        f"Extracted image features for {len(features)}/{total_rows} "
+                        "training pairs.",
+                        flush=True,
+                    )
             except (KeyError, TypeError, ValueError, OSError, json.JSONDecodeError) as error:
                 raise ValueError(
                     f"{manifest_path}:{line_number}: invalid training row: {error}"
@@ -276,7 +292,12 @@ def load_dataset(manifest_path):
         raise ValueError(
             f"At least 5 labeled examples are required; found {len(features)}."
         )
-    return np.asarray(features, dtype=np.float32), np.asarray(targets, dtype=np.float32)
+    return (
+        np.asarray(features, dtype=np.float32),
+        np.asarray(targets, dtype=np.float32),
+        np.asarray(groups),
+        np.asarray(splits),
+    )
 
 
 class ColorMatcher(nn.Module):
@@ -299,12 +320,34 @@ def train(manifest_path, output_path, epochs, seed):
     torch.manual_seed(seed)
     random.seed(seed)
     np.random.seed(seed)
-    x, y = load_dataset(manifest_path)
+    x, y, groups, splits = load_dataset(manifest_path)
 
-    indices = np.random.permutation(len(x))
-    validation_count = max(1, round(len(x) * 0.2))
-    validation_indices = indices[:validation_count]
-    training_indices = indices[validation_count:]
+    if np.any(splits):
+        if not np.all(np.isin(splits, ("train", "validation"))):
+            raise ValueError(
+                "When a manifest uses explicit splits, every row must use "
+                "'train' or 'validation'."
+            )
+        training_indices = np.flatnonzero(splits == "train")
+        validation_indices = np.flatnonzero(splits == "validation")
+        if not len(training_indices) or not len(validation_indices):
+            raise ValueError("Explicit data splits must both contain examples.")
+        training_groups = np.unique(groups[training_indices])
+        validation_groups = np.unique(groups[validation_indices])
+        if np.intersect1d(training_groups, validation_groups).size:
+            raise ValueError("Source-image groups must not appear in both data splits.")
+    else:
+        unique_groups = np.unique(groups)
+        if len(unique_groups) < 2:
+            raise ValueError("Training requires at least two distinct source-image groups.")
+        shuffled_groups = np.random.permutation(unique_groups)
+        validation_group_count = min(
+            len(unique_groups) - 1, max(1, round(len(unique_groups) * 0.2))
+        )
+        validation_groups = shuffled_groups[:validation_group_count]
+        validation_mask = np.isin(groups, validation_groups)
+        validation_indices = np.flatnonzero(validation_mask)
+        training_indices = np.flatnonzero(~validation_mask)
     train_x = torch.from_numpy(x[training_indices])
     train_y = torch.from_numpy(y[training_indices])
     validation_x = torch.from_numpy(x[validation_indices])
@@ -336,6 +379,12 @@ def train(manifest_path, output_path, epochs, seed):
             stale_epochs = 0
         else:
             stale_epochs += 1
+        if epoch == 1 or epoch % 25 == 0:
+            print(
+                f"Epoch {epoch}/{epochs}: training loss={loss.item():.6f}, "
+                f"validation loss={validation_loss:.6f}.",
+                flush=True,
+            )
         if stale_epochs >= patience:
             break
 
@@ -344,6 +393,19 @@ def train(manifest_path, output_path, epochs, seed):
     with torch.no_grad():
         predictions = model(validation_x).numpy()
     mae_by_output = np.abs(predictions - validation_y.numpy()).mean(axis=0)
+    basic_setting_limits = np.asarray((100, 100, 5, 100, 100, 100, 100, 100, 100, 100))
+    basic_setting_names = (
+        "temp",
+        "tint",
+        "exposure",
+        "contrast",
+        "highlights",
+        "shadows",
+        "whites",
+        "blacks",
+        "vibrance",
+        "saturation",
+    )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     example = torch.zeros((1, INPUT_SIZE), dtype=torch.float32)
@@ -361,13 +423,24 @@ def train(manifest_path, output_path, epochs, seed):
         "examples": len(x),
         "trainingExamples": len(training_indices),
         "validationExamples": len(validation_indices),
+        "trainingSourceImages": len(np.unique(groups[training_indices])),
+        "validationSourceImages": len(np.unique(groups[validation_indices])),
         "bestEpoch": best_epoch,
         "validationMse": best_loss,
-        "meanNormalizedAbsoluteError": float(mae_by_output.mean()),
+        "meanNormalizedAbsoluteErrorOnAllOutputs": float(mae_by_output.mean()),
+        "basicSettingMae": {
+            name: float(error * limit)
+            for name, error, limit in zip(
+                basic_setting_names, mae_by_output[:10], basic_setting_limits
+            )
+        },
         "model": str(output_path),
         "inputFeatures": INPUT_SIZE,
         "outputSettings": OUTPUT_SIZE,
     }
+    report_path = manifest_path.parent / "training_report.json"
+    report["report"] = str(report_path)
+    report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report, indent=2))
 
 

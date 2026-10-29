@@ -23,9 +23,24 @@ function appRoute() {
 
 export default defineConfig({
   plugins: [appRoute(), viteSingleFile({ outputFileName: "Grade Match.html" })],
+  server: {
+    headers: {
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Cross-Origin-Embedder-Policy": "require-corp",
+    },
+  },
+  preview: {
+    headers: {
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Cross-Origin-Embedder-Policy": "require-corp",
+    },
+  },
   build: {
     rollupOptions: {
       input: "Grade Match.html",
     },
+  },
+  optimizeDeps: {
+    exclude: ["libraw-wasm"],
   },
 });

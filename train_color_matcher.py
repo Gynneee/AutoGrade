@@ -10,7 +10,7 @@ from PIL import Image
 from torch import nn
 
 
-FEATURES_PER_IMAGE = 101
+FEATURES_PER_IMAGE = 107
 INPUT_SIZE = FEATURES_PER_IMAGE * 2
 OUTPUT_SIZE = 50
 CURVE_X = (0, 32, 64, 128, 192, 224, 255)
@@ -81,6 +81,42 @@ def analyze_image(path):
     lightness, a, b = lab.T
     chroma = np.sqrt(a * a + b * b)
     total = len(lightness)
+    encoded = rgb.reshape(-1, 3)
+    red, green, blue = encoded.T
+    cb = -0.168736 * red - 0.331264 * green + 0.5 * blue + 0.5
+    cr = 0.5 * red - 0.418688 * green - 0.081312 * blue + 0.5
+    in_range = lambda values, low, high, feather: np.clip(
+        np.minimum((values - low) / feather, (high - values) / feather), 0, 1
+    )
+    skin_weights = (
+        in_range(cb, 0.2, 0.55, 0.08)
+        * in_range(cr, 0.45, 0.82, 0.08)
+        * np.clip((red - 0.025) / 0.12, 0, 1)
+        * np.clip((red / np.maximum(green, 0.01) - 0.85) / 0.2, 0, 1)
+        * np.clip((green / np.maximum(blue, 0.015) - 0.65) / 0.3, 0, 1)
+    )
+    skin_count = float(skin_weights.sum())
+    skin_features = [skin_count / total, 0.0, 0.0, 0.0, 0.0, 0.0]
+    skin_pixels = skin_weights > 0
+    if skin_count > 0:
+        skin_lightness_hist = np.bincount(
+            np.clip(
+                (lightness[skin_pixels] * HIST_BINS).astype(np.int64),
+                0,
+                HIST_BINS - 1,
+            ),
+            weights=skin_weights[skin_pixels],
+            minlength=HIST_BINS,
+        )
+        skin_features[1:] = (
+            histogram_quantile(skin_lightness_hist, 0, 1, skin_count, 0.25),
+            histogram_quantile(skin_lightness_hist, 0, 1, skin_count, 0.5),
+            histogram_quantile(skin_lightness_hist, 0, 1, skin_count, 0.75),
+            float(np.dot(a[skin_pixels], skin_weights[skin_pixels]) / skin_count)
+            / 0.4,
+            float(np.dot(b[skin_pixels], skin_weights[skin_pixels]) / skin_count)
+            / 0.4,
+        )
 
     y = 0.2126 * linear[..., 0] + 0.7152 * linear[..., 1] + 0.0722 * linear[..., 2]
     y = np.where(y <= 0.0031308, 12.92 * y, 1.055 * np.power(y, 1 / 2.4) - 0.055)
@@ -165,6 +201,7 @@ def analyze_image(path):
         "dq": luminance_quantiles + a_quantiles + b_quantiles,
         "band": bands,
         "zone": zone,
+        "skin": skin_features,
         "value_hist": value_hist,
         "light_hist": light_hist,
         "a_hist": a_hist,
@@ -193,6 +230,7 @@ def features_from_stats(stats):
     for index in range(3):
         share, a, b = stats["zone"][index * 3 : index * 3 + 3]
         values.extend((share, a / 0.4, b / 0.4))
+    values.extend(stats["skin"])
     if len(values) != FEATURES_PER_IMAGE:
         raise ValueError(f"Expected {FEATURES_PER_IMAGE} image features; got {len(values)}")
     return values
@@ -253,41 +291,53 @@ def target_vector(settings, sample_number):
     return values
 
 
-def load_dataset(manifest_path):
-    base = manifest_path.parent
+def load_dataset(manifest_paths):
     features, targets, groups, splits = [], [], [], []
     image_features = {}
-    with manifest_path.open(encoding="utf-8") as manifest:
-        total_rows = sum(1 for line in manifest if line.strip())
-    with manifest_path.open(encoding="utf-8") as manifest:
-        for line_number, line in enumerate(manifest, start=1):
-            if not line.strip():
-                continue
-            try:
-                row = json.loads(line)
-                source_path = (base / row["source"]).resolve()
-                reference_path = (base / row["reference"]).resolve()
-                for image_path in (source_path, reference_path):
-                    if image_path not in image_features:
-                        image_features[image_path] = features_from_stats(
-                            analyze_image(image_path)
-                        )
-                source_features = image_features[source_path]
-                reference_features = image_features[reference_path]
-                features.append(source_features + reference_features)
-                targets.append(target_vector(row["settings"], len(targets) + 1))
-                groups.append(str(row.get("group", row["source"])))
-                splits.append(str(row.get("split", "")))
-                if len(features) % 500 == 0:
-                    print(
-                        f"Extracted image features for {len(features)}/{total_rows} "
-                        "training pairs.",
-                        flush=True,
+    total_rows = 0
+    for manifest_path in manifest_paths:
+        with manifest_path.open(encoding="utf-8") as manifest:
+            total_rows += sum(1 for line in manifest if line.strip())
+    for manifest_path in manifest_paths:
+        base = manifest_path.parent
+        group_prefix = str(base.resolve())
+        with manifest_path.open(encoding="utf-8") as manifest:
+            for line_number, line in enumerate(manifest, start=1):
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                    source_path = (base / row["source"]).resolve()
+                    reference_path = (base / row["reference"]).resolve()
+                    for image_path in (source_path, reference_path):
+                        if image_path not in image_features:
+                            image_features[image_path] = features_from_stats(
+                                analyze_image(image_path)
+                            )
+                    source_features = image_features[source_path]
+                    reference_features = image_features[reference_path]
+                    features.append(source_features + reference_features)
+                    targets.append(target_vector(row["settings"], len(targets) + 1))
+                    groups.append(
+                        f"{group_prefix}::{row.get('group', row['source'])}"
                     )
-            except (KeyError, TypeError, ValueError, OSError, json.JSONDecodeError) as error:
-                raise ValueError(
-                    f"{manifest_path}:{line_number}: invalid training row: {error}"
-                ) from error
+                    splits.append(str(row.get("split", "")))
+                    if len(features) % 500 == 0:
+                        print(
+                            f"Extracted image features for {len(features)}/{total_rows} "
+                            "training pairs.",
+                            flush=True,
+                        )
+                except (
+                    KeyError,
+                    TypeError,
+                    ValueError,
+                    OSError,
+                    json.JSONDecodeError,
+                ) as error:
+                    raise ValueError(
+                        f"{manifest_path}:{line_number}: invalid training row: {error}"
+                    ) from error
     if len(features) < 5:
         raise ValueError(
             f"At least 5 labeled examples are required; found {len(features)}."
@@ -419,11 +469,12 @@ class ColorMatcher(nn.Module):
         return self.layers(features)
 
 
-def train(manifest_path, output_path, epochs, seed):
+def train(manifest_paths, output_path, epochs, seed):
     torch.manual_seed(seed)
     random.seed(seed)
     np.random.seed(seed)
-    x, y, groups, splits = load_dataset(manifest_path)
+    manifest_path = manifest_paths[0]
+    x, y, groups, splits = load_dataset(manifest_paths)
 
     if np.any(splits):
         if not np.all(np.isin(splits, ("train", "validation"))):
@@ -613,7 +664,13 @@ def main():
     parser = argparse.ArgumentParser(
         description="Train the local Grade Match model and export it for browser inference."
     )
-    parser.add_argument("--manifest", type=Path, required=True, help="Labeled JSONL dataset.")
+    parser.add_argument(
+        "--manifest",
+        type=Path,
+        action="append",
+        required=True,
+        help="Labeled JSONL dataset; repeat to combine multiple datasets.",
+    )
     parser.add_argument(
         "--output",
         type=Path,
@@ -625,7 +682,12 @@ def main():
     args = parser.parse_args()
     if args.epochs < 1:
         parser.error("--epochs must be positive.")
-    train(args.manifest.resolve(), args.output.resolve(), args.epochs, args.seed)
+    train(
+        [path.resolve() for path in args.manifest],
+        args.output.resolve(),
+        args.epochs,
+        args.seed,
+    )
 
 
 if __name__ == "__main__":

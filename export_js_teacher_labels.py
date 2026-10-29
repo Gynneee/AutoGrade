@@ -12,12 +12,13 @@ SOURCE_MANIFEST = DATASET / "train.jsonl"
 
 
 class TeacherExportServer(ThreadingHTTPServer):
-    def __init__(self, address, handler, selected, output_path):
+    def __init__(self, address, handler, selected, output_path, dataset_root):
         super().__init__(address, handler)
         self.selected = selected
         self.expected = {row["group"]: row for row in selected}
         self.seen = set()
         self.output_path = output_path
+        self.dataset_root = dataset_root
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -61,8 +62,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if request.path == "/image":
             relative = parse_qs(request.query).get("path", [""])[0]
-            image_path = (DATASET / relative).resolve()
-            allowed = (DATASET / "images").resolve()
+            image_path = (self.server.dataset_root / relative).resolve()
+            allowed = (self.server.dataset_root / "images").resolve()
             if (
                 not image_path.is_relative_to(allowed)
                 or image_path.suffix.lower() not in (".jpg", ".jpeg")
@@ -171,9 +172,9 @@ class Handler(BaseHTTPRequestHandler):
             super().log_message(format_string, *args)
 
 
-def load_pairs(limit):
+def load_pairs(limit, manifest_path):
     by_group = {}
-    with SOURCE_MANIFEST.open(encoding="utf-8") as manifest:
+    with manifest_path.open(encoding="utf-8") as manifest:
         for line in manifest:
             if not line.strip():
                 continue
@@ -196,6 +197,12 @@ def main():
     parser.add_argument("--limit", type=int, default=1000)
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument(
+        "--manifest",
+        type=Path,
+        default=SOURCE_MANIFEST,
+        help="Source/reference manifest to expose for labeling.",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=DATASET / "js_teacher_manifest.jsonl",
@@ -211,8 +218,15 @@ def main():
             f"Refusing to overwrite existing teacher labels: {output_path}"
         )
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    selected = load_pairs(args.limit)
-    server = TeacherExportServer(("127.0.0.1", args.port), Handler, selected, output_path)
+    manifest_path = args.manifest.resolve()
+    selected = load_pairs(args.limit, manifest_path)
+    server = TeacherExportServer(
+        ("127.0.0.1", args.port),
+        Handler,
+        selected,
+        output_path,
+        manifest_path.parent,
+    )
     print(f"Teacher-label server: http://127.0.0.1:{args.port}", flush=True)
     print(
         "Open http://localhost:5173/Grade%20Match.html?trainingTeacher=1 "

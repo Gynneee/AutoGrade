@@ -6,15 +6,17 @@ The app runs locally in your browser. Your photos are processed on your device a
 
 ## Features
 
-- Upload a source photo and a reference image (JPEG, PNG, or WebP).
+- Upload a source photo and a reference image (JPEG, PNG, WebP, or supported camera RAW formats such as ARW, CR2, CR3, NEF, and DNG).
 - Compare the original and matched result with a draggable split preview.
 - Inspect luminance histograms and dominant colors.
 - Adjust white balance, tone, tone curve, HSL, color grading, and match strength.
+- Optionally protect likely skin-colored pixels from aggressive HSL and grading color shifts.
+- Apply manual radial barrel/pincushion distortion correction.
 - Export the matched image as PNG or copy Lightroom-compatible preset XML and settings.
 - Optionally run a locally trained ONNX model in the browser.
 - Fall back to the built-in calculation-based matcher when no trained model is installed.
 
-RAW files are not supported directly in the browser; export them as JPEG first.
+RAW files are developed locally by LibRaw into an RGB image that can be edited and exported as PNG. This does not modify or export the original sensor data. The manual distortion control is not camera/lens-profile based; automatic lens profiles and Lightroom-grade RAW rendering are not implemented. Optical correction is baked into PNG exports, not copied into XMP presets.
 
 ## Run locally
 
@@ -25,21 +27,23 @@ npm install
 npm run dev
 ```
 
-Open the local address printed by Vite. To create a self-contained HTML build:
+Open the local address printed by Vite. The development server sets the cross-origin isolation headers required by the RAW decoder. Static deployments need to set `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp` too.
+
+To create a single-HTML app build:
 
 ```powershell
 npm run build
 ```
 
-The single-file build is written to `dist/Grade Match.html`. It can be opened in a browser; use the development server when testing a local ONNX model.
+The app page is written to `dist/Grade Match.html`; LibRaw's worker bundles are separate files in `dist/`, so keep the complete output directory together and serve it with the headers above to use RAW decoding. Use the development server when testing a local ONNX model.
 
 ## AI model and current status
 
 The optional AI is a supervised neural network trained locally with Python and exported to ONNX. The browser runs ONNX inference using ONNX Runtime Web. The model accepts summaries of the source and reference images and predicts 50 Lightroom-style adjustment values.
 
-The model is trained locally to imitate the JavaScript color-matching solver on synthetic same-photo flower pairs. The browser runs both the ONNX model and the calculation matcher, then selects the result with the lower measured distance to the reference. This quality guard means the UI can use JavaScript when it outperforms the current model; the status message identifies which result was selected. This is not a claim that the neural network is more accurate than its teacher. See the training guide and attribution files for details.
+The model is trained locally to imitate the JavaScript color-matching solver on synthetic same-photo pairs. The browser runs both the ONNX model and the calculation matcher, then selects the result with the lower measured distance to the reference. This is a quality guard, not a claim that the neural network is more accurate than its teacher. Portrait expansion and the skin-protection limitation are documented in [the training guide](docs/ai-training.md#portrait-focused-expansion-and-skin-tone-handling).
 
-The compact model uses 1,000 solver-labeled pairs from the CC BY 2.0 flower set (800 training / 200 held-out photos). In a held-out preview comparison, the AI alone reduced the app's reference-distance metric by 62%, versus 96% for the JavaScript solver; the app therefore selects the solver on that example. The model and detailed training statistics are local under `public\models\color_matcher.onnx` and `dataset\flower_match\`; both are Git-ignored and will not be present in a fresh clone. See [the training curve](docs/training_curves.svg) and [validation report](docs/ai-training.md#training-report-and-graph).
+The latest run used 1,096 solver-labeled pairs: 1,000 flower, 60 diverse-scene, and 36 additional portrait pairs (876 training / 220 held-out groups). It stopped after 188 epochs and restored the best checkpoint from epoch 148. Validation MSE was 0.12175 and normalized MAE was 0.21357, compared with a 0.32989 zero-output baseline (35.3% lower MAE). These are setting-prediction metrics on synthetic solver labels, not perceptual accuracy or skin-tone precision. The ONNX model and detailed run statistics are Git-ignored under `public\models\` and `dataset\`; they are not included in a fresh clone. See [the training curve](docs/training_curves.svg) and [the training guide](docs/ai-training.md#training-report-and-graph).
 
 For training details, dataset format, and limitations, see [docs/ai-training.md](docs/ai-training.md).
 
@@ -74,6 +78,8 @@ The model does not generate pixels directly. It predicts adjustment controls; th
 - `script.js` and `styles.css` — browser behavior and styling.
 - `train_color_matcher.py` — local neural-network training and ONNX export.
 - `prepare_synthetic_training.py` — creates labeled synthetic examples from the compact flower-photo dataset.
+- `prepare_diverse_training.py` — obtains openly licensed scene photos and generates diverse synthetic pairs.
+- `export_js_teacher_labels.py` — locally collects adjustment labels from the JavaScript solver.
 - `docs/ai-training.md` — dataset, training, and model instructions.
 
 ## License

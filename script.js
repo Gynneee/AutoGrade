@@ -1,4 +1,5 @@
 import * as ort from "onnxruntime-web/wasm";
+import LibRaw from "libraw-wasm";
 
 ("use strict");
 const RAD = 180 / Math.PI,
@@ -97,6 +98,21 @@ function hsv2rgb(h, s, v) {
   }
   return [r + m, g + m, b + m];
 }
+
+function skinColorConfidence(red, green, blue) {
+  const cb = -0.168736 * red - 0.331264 * green + 0.5 * blue + 0.5,
+    cr = 0.5 * red - 0.418688 * green - 0.081312 * blue + 0.5;
+  const inRange = (value, low, high, feather) =>
+    clampN(Math.min((value - low) / feather, (high - value) / feather), 0, 1);
+  return (
+    inRange(cb, 0.2, 0.55, 0.08) *
+    inRange(cr, 0.45, 0.82, 0.08) *
+    clampN((red - 0.025) / 0.12, 0, 1) *
+    clampN((red / Math.max(green, 0.01) - 0.85) / 0.2, 0, 1) *
+    clampN((green / Math.max(blue, 0.015) - 0.65) / 0.3, 0, 1)
+  );
+}
+
 const _lab = [0, 0, 0];
 function hsvToLabAngleExact(h) {
   const c = hsv2rgb(h, 1, 1);
@@ -148,6 +164,70 @@ let _bi = 0,
   _bt = 0,
   _d0 = 0,
   _d1 = 0;
+const RAW_EXTENSIONS = /\.(arw|cr2|cr3|nef|dng|raf|orf|rw2|pef|srw|x3f)$/i;
+
+async function decodeRawFile(file) {
+  if (file.size > 200 * 1024 * 1024)
+    throw new Error("RAW files larger than 200 MB are not supported.");
+  const decoder = new LibRaw();
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    await decoder.open(bytes, {
+      useCameraWb: true,
+      outputColor: 1,
+      outputBps: 8,
+      noAutoBright: true,
+      userFlip: -1,
+    });
+    const [image, metadata] = await Promise.all([
+      decoder.imageData(),
+      decoder.metadata(),
+    ]);
+    if (
+      !image ||
+      !image.data ||
+      !Number.isInteger(image.width) ||
+      !Number.isInteger(image.height) ||
+      image.width < 1 ||
+      image.height < 1
+    ) {
+      throw new Error("The RAW decoder did not return valid image pixels.");
+    }
+    const channels = image.colors || 3;
+    if (
+      channels < 3 ||
+      image.data.length < image.width * image.height * channels
+    ) {
+      throw new Error("The RAW decoder returned incomplete RGB pixels.");
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = image.width;
+    canvas.height = image.height;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (!context) throw new Error("Could not create the RAW conversion canvas.");
+    const pixels = context.createImageData(image.width, image.height);
+    const divisor = image.data instanceof Uint16Array ? 257 : 1;
+    for (
+      let sourceIndex = 0, targetIndex = 0;
+      targetIndex < pixels.data.length;
+      sourceIndex += channels, targetIndex += 4
+    ) {
+      pixels.data[targetIndex] = Math.round(image.data[sourceIndex] / divisor);
+      pixels.data[targetIndex + 1] = Math.round(
+        image.data[sourceIndex + 1] / divisor,
+      );
+      pixels.data[targetIndex + 2] = Math.round(
+        image.data[sourceIndex + 2] / divisor,
+      );
+      pixels.data[targetIndex + 3] = 255;
+    }
+    context.putImageData(pixels, 0, 0);
+    return { image: canvas, metadata };
+  } finally {
+    decoder.dispose();
+  }
+}
+
 function bandOf(th) {
   const ths = th < BAND_ANG[0] ? th + 360 : th;
   let bi = 7;
@@ -320,6 +400,13 @@ function process(lin, n, p, out) {
     E0 = 0.003;
   for (let i = 0; i < n; i++) {
     const k = i * 3;
+    const skinConfidence = state.protectSkin
+      ? skinColorConfidence(
+          oetf(lin[k]),
+          oetf(lin[k + 1]),
+          oetf(lin[k + 2]),
+        )
+      : 0;
     let r = lin[k] * gR,
       g = lin[k + 1] * gG,
       b = lin[k + 2] * gB;
@@ -344,6 +431,9 @@ function process(lin, n, p, out) {
       let L = lab[0],
         A = lab[1],
         B = lab[2];
+      const toneA = A,
+        toneB = B,
+        toneL = L;
       const C = Math.sqrt(A * A + B * B);
       if (C > 1e-6) {
         let th = Math.atan2(B, A) * RAD;
@@ -367,6 +457,12 @@ function process(lin, n, p, out) {
           wm = gauss(L, 0.55, 0.2);
         A += gr[0][0] * ws + gr[1][0] * wm + gr[2][0] * wh;
         B += gr[0][1] * ws + gr[1][1] * wm + gr[2][1] * wh;
+      }
+      if (skinConfidence > 0) {
+        const colorAdjustment = 1 - 0.55 * skinConfidence;
+        A = toneA + (A - toneA) * colorAdjustment;
+        B = toneB + (B - toneB) * colorAdjustment;
+        L = toneL + (L - toneL) * colorAdjustment;
       }
       lab2lin(L, A, B, rgb);
       r = rgb[0] < 0 ? 0 : rgb[0] > 1 ? 1 : rgb[0];
@@ -422,18 +518,37 @@ function analyze(lin, n) {
   const zW = [0, 0, 0],
     zA = [0, 0, 0],
     zB = [0, 0, 0],
+    skinSum = [0, 0],
+    skinCount = [0],
+    skinHist = new Float64Array(NB),
     lab = [0, 0, 0];
   for (let i = 0; i < n; i++) {
     const k = i * 3,
       r = lin[k],
       g = lin[k + 1],
       b = lin[k + 2];
-    hv[bin(oetf(0.2126 * r + 0.7152 * g + 0.0722 * b), 0, 1)]++;
+    const encodedR = oetf(r),
+      encodedG = oetf(g),
+      encodedB = oetf(b);
+    hv[
+      bin(
+        oetf(0.2126 * r + 0.7152 * g + 0.0722 * b),
+        0,
+        1,
+      )
+    ]++;
     lin2lab(r, g, b, lab);
     const L = lab[0],
       A = lab[1],
       B = lab[2],
       C = Math.sqrt(A * A + B * B);
+    const skinWeight = skinColorConfidence(encodedR, encodedG, encodedB);
+    if (skinWeight > 0) {
+      skinCount[0] += skinWeight;
+      skinHist[bin(L, 0, 1)] += skinWeight;
+      skinSum[0] += skinWeight * A;
+      skinSum[1] += skinWeight * B;
+    }
     hL[bin(L, 0, 1)]++;
     hA[bin(A, -0.4, 0.4)]++;
     hB[bin(B, -0.4, 0.4)]++;
@@ -488,6 +603,16 @@ function analyze(lin, n) {
       a: zW[z] > 0 ? zA[z] / zW[z] : 0,
       b: zW[z] > 0 ? zB[z] / zW[z] : 0,
     })),
+    skin: skinCount[0]
+      ? [
+          skinCount[0] / n,
+          histQ(skinHist, 0, 1, skinCount[0], 0.25),
+          histQ(skinHist, 0, 1, skinCount[0], 0.5),
+          histQ(skinHist, 0, 1, skinCount[0], 0.75),
+          (skinSum[0] / skinCount[0]) / 0.4,
+          (skinSum[1] / skinCount[0]) / 0.4,
+        ]
+      : [0, 0, 0, 0, 0, 0],
     qv: (q) => histQ(hv, 0, 1, n, q),
     qc: (q) => histQ(hC, 0, 0.4, n, q),
   };
@@ -495,7 +620,17 @@ function analyze(lin, n) {
 function distance(a, b) {
   let s = 0;
   for (let i = 0; i < a.dq.length; i++) s += Math.abs(a.dq[i] - b.dq[i]);
-  return (s / PQ.length) * 100;
+  let score = (s / PQ.length) * 100;
+  if (a.skin[0] >= 0.02 && b.skin[0] >= 0.02) {
+    const skinDifferences = [1, 2, 3, 4, 5].map((index) =>
+      Math.abs(a.skin[index] - b.skin[index]),
+    );
+    score +=
+      (skinDifferences.reduce((sum, value) => sum + value, 0) /
+        skinDifferences.length) *
+      18;
+  }
+  return score;
 }
 
 function palette(lin, n, K) {
@@ -907,7 +1042,7 @@ function kelvinFor(base, t) {
   return Math.round(1e6 / Math.max(mired, 50) / 10) * 10;
 }
 
-const MODEL_FEATURES_PER_IMAGE = 101;
+const MODEL_FEATURES_PER_IMAGE = 107;
 const MODEL_INPUT_SIZE = MODEL_FEATURES_PER_IMAGE * 2;
 const MODEL_OUTPUT_SIZE = 50;
 const MODEL_CURVE_X = [0, 32, 64, 128, 192, 224, 255];
@@ -925,6 +1060,7 @@ function modelFeatures(stats) {
   stats.zone.forEach((zone) =>
     features.push(zone.f, zone.a / 0.4, zone.b / 0.4),
   );
+  features.push(...stats.skin);
   if (
     features.length !== MODEL_FEATURES_PER_IMAGE ||
     features.some((value) => !Number.isFinite(value))
@@ -1023,6 +1159,8 @@ const state = {
   model: null,
   mods: ALL_MODS(),
   strength: 100,
+  distortion: 0,
+  protectSkin: true,
   solved: null,
   final: null,
   metrics: null,
@@ -1233,7 +1371,54 @@ async function decodeFile(file) {
     });
   }
 }
-function buildRecord(source, name, isSample) {
+function correctLensDistortionRows(
+  sourcePixels,
+  outputPixels,
+  width,
+  height,
+  amount,
+  startRow,
+  endRow,
+) {
+  const coefficient = (amount / 100) * 0.12,
+    fit = 1 / (1 + coefficient * (coefficient > 0 ? 2 : 1)),
+    centerX = (width - 1) / 2,
+    centerY = (height - 1) / 2,
+    radiusX = Math.max(centerX, 1),
+    radiusY = Math.max(centerY, 1);
+  for (let y = startRow; y < endRow; y++) {
+    const normY = (y - centerY) / radiusY;
+    for (let x = 0; x < width; x++) {
+      const normX = (x - centerX) / radiusX,
+        radiusSquared = normX * normX + normY * normY,
+        scale = fit * (1 + coefficient * radiusSquared),
+        sourceX = clampN(centerX + (x - centerX) * scale, 0, width - 1),
+        sourceY = clampN(centerY + (y - centerY) * scale, 0, height - 1),
+        x0 = Math.floor(sourceX),
+        y0 = Math.floor(sourceY),
+        x1 = Math.min(width - 1, x0 + 1),
+        y1 = Math.min(height - 1, y0 + 1),
+        fx = sourceX - x0,
+        fy = sourceY - y0,
+        topLeft = (y0 * width + x0) * 4,
+        topRight = (y0 * width + x1) * 4,
+        bottomLeft = (y1 * width + x0) * 4,
+        bottomRight = (y1 * width + x1) * 4,
+        target = (y * width + x) * 4;
+      for (let channel = 0; channel < 4; channel++) {
+        const top =
+            sourcePixels[topLeft + channel] * (1 - fx) +
+            sourcePixels[topRight + channel] * fx,
+          bottom =
+            sourcePixels[bottomLeft + channel] * (1 - fx) +
+            sourcePixels[bottomRight + channel] * fx;
+        outputPixels[target + channel] = top * (1 - fy) + bottom * fy;
+      }
+    }
+  }
+}
+
+function buildRecord(source, name, isSample, distortion = 0) {
   const w0 = source.naturalWidth || source.width,
     h0 = source.naturalHeight || source.height;
   const fs = Math.min(1, 1000 / Math.max(w0, h0)),
@@ -1246,6 +1431,19 @@ function buildRecord(source, name, isSample) {
   cx.imageSmoothingQuality = "high";
   cx.drawImage(source, 0, 0, fw, fh);
   const full = cx.getImageData(0, 0, fw, fh);
+  if (distortion) {
+    const sourcePixels = new Uint8ClampedArray(full.data);
+    correctLensDistortionRows(
+      sourcePixels,
+      full.data,
+      fw,
+      fh,
+      distortion,
+      0,
+      fh,
+    );
+    cx.putImageData(full, 0, 0);
+  }
   const ss = Math.min(1, 256 / Math.max(fw, fh)),
     sw = Math.max(1, Math.round(fw * ss)),
     sh = Math.max(1, Math.round(fh * ss));
@@ -1261,6 +1459,7 @@ function buildRecord(source, name, isSample) {
     name,
     isSample,
     source,
+    distortion,
     w0,
     h0,
     fw,
@@ -1283,7 +1482,14 @@ function setSlot(which, rec) {
   t.width = Math.round(rec.fw * s);
   t.height = Math.round(rec.fh * s);
   t.getContext("2d").drawImage(rec.canvas, 0, 0, t.width, t.height);
-  $("#meta-" + which).textContent = rec.name + " · " + rec.w0 + "×" + rec.h0;
+  $("#meta-" + which).textContent =
+    (rec.cameraModel ? rec.cameraModel + " · " : "") +
+    rec.name +
+    " · " +
+    rec.w0 +
+    "×" +
+    rec.h0 +
+    (rec.developedRaw ? " · RAW developed locally" : "");
   $("#pill-" + which).hidden = !rec.isSample;
   $("#err-" + which).hidden = true;
 }
@@ -1292,8 +1498,18 @@ async function loadFile(which, file) {
   err.hidden = true;
   if (!file) return;
   try {
-    const bmp = await decodeFile(file);
-    const rec = buildRecord(bmp, file.name, false);
+    const isRaw = RAW_EXTENSIONS.test(file.name);
+    const decoded = isRaw
+      ? await decodeRawFile(file)
+      : { image: await decodeFile(file), metadata: null };
+    const rec = buildRecord(
+      decoded.image,
+      file.name,
+      false,
+      which === "src" ? state.distortion : 0,
+    );
+    rec.developedRaw = isRaw;
+    rec.cameraModel = decoded.metadata?.camera_model || "";
     state[which] = rec;
     setSlot(which, rec);
     if (which === "src") setupStage();
@@ -1303,8 +1519,38 @@ async function loadFile(which, file) {
     err.textContent =
       "Could not load this image: " +
       (e instanceof Error ? e.message : String(e)) +
-      ". Use a valid JPEG, PNG or WebP. For RAW files, export a JPEG first.";
+      ". Use a supported image or camera RAW file (ARW, CR2, CR3, NEF, DNG, RAF, ORF, RW2, PEF, SRW or X3F).";
     err.hidden = false;
+  }
+}
+
+function updateLensDistortion(amount) {
+  state.distortion = amount;
+  const current = state.src;
+  if (!current) return;
+  try {
+    const updated = buildRecord(
+      current.source,
+      current.name,
+      current.isSample,
+      amount,
+    );
+    updated.developedRaw = current.developedRaw;
+    updated.cameraModel = current.cameraModel;
+    state.src = updated;
+    setSlot("src", updated);
+    setupStage();
+    void recompute();
+  } catch (error) {
+    console.error("Could not apply manual lens distortion correction.", error);
+    $("#err-src").textContent =
+      "Could not apply lens correction: " +
+      (error instanceof Error ? error.message : String(error));
+    $("#err-src").hidden = false;
+    state.distortion = current.distortion;
+    $("#distortion").value = String(current.distortion);
+    $("#distortion-out").textContent =
+      (current.distortion > 0 ? "+" : "") + current.distortion;
   }
 }
 
@@ -1756,6 +2002,24 @@ async function exportMatchedImage(btn) {
     if (!context) throw new Error("Could not create an image canvas.");
     context.drawImage(source, 0, 0, width, height);
     const rowsPerChunk = 48;
+    if (state.src.distortion) {
+      const sourcePixels = context.getImageData(0, 0, width, height).data,
+        correctedPixels = new Uint8ClampedArray(sourcePixels.length);
+      for (let y = 0; y < height; y += rowsPerChunk) {
+        correctLensDistortionRows(
+          sourcePixels,
+          correctedPixels,
+          width,
+          height,
+          state.src.distortion,
+          y,
+          Math.min(height, y + rowsPerChunk),
+        );
+        if (y + rowsPerChunk < height)
+          await new Promise((resolve) => requestAnimationFrame(resolve));
+      }
+      context.putImageData(new ImageData(correctedPixels, width, height), 0, 0);
+    }
     for (let y = 0; y < height; y += rowsPerChunk) {
       const rows = Math.min(rowsPerChunk, height - y);
       const image = context.getImageData(0, y, width, rows);
@@ -1864,12 +2128,23 @@ function wire() {
     $("#strength-out").textContent = state.strength + "%";
     applyStrength();
   });
+  $("#distortion").addEventListener("input", (e) => {
+    const amount = Number(e.target.value);
+    $("#distortion-out").textContent = (amount > 0 ? "+" : "") + amount;
+  });
+  $("#distortion").addEventListener("change", (e) =>
+    updateLensDistortion(Number(e.target.value)),
+  );
   document.querySelectorAll("[data-mod]").forEach((cb) =>
     cb.addEventListener("change", () => {
       state.mods[cb.dataset.mod] = cb.checked;
       recompute();
     }),
   );
+  $("#protect-skin").addEventListener("change", (event) => {
+    state.protectSkin = event.currentTarget.checked;
+    recompute();
+  });
   $("#kbase").addEventListener("input", (e) => {
     state.kelvin = +e.target.value || 0;
     if (state.final) renderPanel();

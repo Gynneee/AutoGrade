@@ -54,14 +54,14 @@
                 ><span class="upload-icon" aria-hidden="true">↥</span
                 ><span
                   ><strong>Choose an image</strong
-                  ><small>or drag and drop · JPG, PNG, WebP</small></span
+                  ><small>JPG, PNG, WebP, ARW, CR2 + more</small></span
                 ></span
               >
               <input
                 class="sr-only"
                 id="file-src"
                 type="file"
-                accept="image/*"
+                accept="image/*,.arw,.cr2,.cr3,.nef,.dng,.raf,.orf,.rw2,.pef,.srw,.x3f"
               />
             </label>
             <div class="slot-foot">
@@ -87,14 +87,14 @@
                 ><span class="upload-icon" aria-hidden="true">↥</span
                 ><span
                   ><strong>Choose a reference</strong
-                  ><small>or drag and drop · JPG, PNG, WebP</small></span
+                  ><small>JPG, PNG, WebP, ARW, CR2 + more</small></span
                 ></span
               >
               <input
                 class="sr-only"
                 id="file-ref"
                 type="file"
-                accept="image/*"
+                accept="image/*,.arw,.cr2,.cr3,.nef,.dng,.raf,.orf,.rw2,.pef,.srw,.x3f"
               />
             </label>
             <div class="slot-foot">
@@ -254,6 +254,10 @@
                 ><input type="checkbox" data-mod="grade" checked />Color
                 grading</label
               >
+              <label
+                ><input id="protect-skin" type="checkbox" checked />Protect
+                skin tones</label
+              >
             </div>
           </section>
           <section>
@@ -270,6 +274,25 @@
                 value="5500"
               /><span>K</span>
             </div>
+          </section>
+          <section aria-label="Manual lens correction">
+            <h2 class="sec-title">Optics</h2>
+            <div class="ctl">
+              <label for="distortion">Distortion</label
+              ><input
+                id="distortion"
+                type="range"
+                min="-100"
+                max="100"
+                step="1"
+                value="0"
+              /><output id="distortion-out">0</output>
+            </div>
+            <p class="help">
+              Manual radial correction only: negative adjusts barrel distortion;
+              positive adjusts pincushion. No camera/lens profiles. Baked into
+              PNG exports, not copied into XMP presets.
+            </p>
           </section>
           <section>
             <h2 class="sec-title">Tone curve</h2>
